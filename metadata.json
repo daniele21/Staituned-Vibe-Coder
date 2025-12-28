@@ -1,0 +1,5 @@
+{
+  "name": "VibeCoder Studio",
+  "description": "An AI-powered web IDE for generating and editing web application code using Gemini 3 Pro.",
+  "requestFramePermissions": []
+}
