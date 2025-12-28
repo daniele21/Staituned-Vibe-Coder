@@ -1,76 +1,273 @@
-import { GoogleGenAI } from "@google/genai";
-import { Message, FileSystem } from "../types";
+import { GoogleGenAI, Tool, FunctionDeclaration, Type } from "@google/genai";
+import { Message, FileSystem, TerminalEntry, AgentMode } from "../types";
+import { tool_repo_map, tool_read, tool_search, tool_run_checks } from "./tools";
 
-const SYSTEM_INSTRUCTION = `
-You are VibeCoder, an expert AI coding assistant. You are building a React application in a live environment.
-Your goal is to generate, edit, and explain code based on user requests.
+/**
+ * GOOGLE ADK PATTERN IMPLEMENTATION
+ * 
+ * This service implements the ADK (Agent Development Kit) Runtime Loop:
+ * 1. Plan: Model thoughts (via Thinking Model or internal monologue).
+ * 2. Patch: Model calls 'write_file'.
+ * 3. Verify: Runtime AUTOMATICALLY runs 'run_checks'.
+ * 4. Reflect: Runtime feeds check results back to Model for immediate iteration.
+ */
 
-**CRITICAL OUTPUT FORMAT:**
-You MUST strictly follow this XML-like format for EVERY file you create or update. 
-<FILE path="src/App.tsx">
-import React from 'react';
-// ... full code ...
-</FILE>
-
-**RULES:**
-1. Always provide the FULL content of the file. No placeholders.
-2. For the best "Vibe Coding" experience, try to keep the application logic centralized in 'src/App.tsx' if possible, or use clear modular components.
-3. The environment supports standard React hooks, Tailwind CSS, and lucide-react icons.
-4. When asked to "fix" or "change" something, rely on the provided CURRENT FILE CONTENT to know what to edit.
-5. You can create multiple files.
+const INSTRUCTION_ARCHITECT = `
+You are the **ARCHITECT** in the ADK Runtime.
+**Goal**: Plan the structure and strategy.
+**Rules**:
+- Analyze the request and codebase.
+- Output a high-level step-by-step plan.
+- DO NOT write code. Delegate to the Engineer.
+- Use 'list_files' and 'search_files' to understand context.
 `;
 
-export class GeminiService {
+const INSTRUCTION_ENGINEER = `
+You are the **ENGINEER** in the ADK Runtime.
+**Goal**: Implement features and ensure stability.
+**ADK Loop Enforced**:
+1. **PLAN**: Briefly explain what you are changing.
+2. **PATCH**: Use 'write_file' to create/edit files. ALWAYS provide full content.
+3. **VERIFY**: The runtime will AUTOMATICALLY run 'run_checks' after every 'write_file'.
+4. **REFLECT**: You will receive the check results immediately.
+   - If ✅ PASS: Move to next task.
+   - If ❌ FAIL: You MUST fix the error in the immediate next turn.
+`;
+
+const INSTRUCTION_FIXER = `
+You are the **FIXER** in the ADK Runtime.
+**Goal**: Resolve build/lint errors.
+**Rules**:
+- Focus ONLY on the errors reported.
+- Read files -> Write fix -> Runtime auto-verifies.
+- Repeat until 'run_checks' passes.
+`;
+
+// Define Tool Schemas
+const toolsDef = [
+  {
+    functionDeclarations: [
+      {
+        name: "list_files",
+        description: "Get a map of the current file structure with sizes.",
+      },
+      {
+        name: "read_file",
+        description: "Read the content of a specific file.",
+        parameters: {
+          type: Type.OBJECT,
+          properties: {
+            path: { type: Type.STRING, description: "The path of the file to read" }
+          },
+          required: ["path"]
+        }
+      },
+      {
+        name: "write_file",
+        description: "Create or overwrite a file. Triggers AUTO-VERIFY.",
+        parameters: {
+          type: Type.OBJECT,
+          properties: {
+            path: { type: Type.STRING, description: "The path of the file" },
+            content: { type: Type.STRING, description: "The FULL content of the file" }
+          },
+          required: ["path", "content"]
+        }
+      },
+      {
+        name: "run_checks",
+        description: "Run type checking and linting. (Called automatically by Runtime)",
+      },
+      {
+        name: "search_files",
+        description: "Search for a string pattern in all files.",
+        parameters: {
+          type: Type.OBJECT,
+          properties: {
+            query: { type: Type.STRING, description: "The string or regex to search for" }
+          },
+          required: ["query"]
+        }
+      }
+    ] as FunctionDeclaration[]
+  }
+];
+
+export type AgentEvent = 
+  | { type: 'message', message: Message }
+  | { type: 'files', files: FileSystem }
+  | { type: 'terminal', entry: TerminalEntry }
+  | { type: 'done' };
+
+export class AdkService {
   private ai: GoogleGenAI;
 
   constructor() {
     this.ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   }
 
-  async sendMessage(history: Message[], newMessage: string, files: FileSystem, model: string = 'gemini-3-pro-preview'): Promise<string> {
-    try {
-      // 1. Construct the context about current files
-      let fileContext = "Here is the current state of the application files:\n\n";
-      for (const [path, file] of Object.entries(files)) {
-        fileContext += `--- BEGIN FILE: ${path} ---\n${file.content}\n--- END FILE: ${path} ---\n\n`;
-      }
-      
-      const contextMessage = `
-${fileContext}
-
-User Request: ${newMessage}
-`;
-
-      // 2. Prepare contents for API
-      const contents = history.map(msg => ({
-        role: msg.role,
-        parts: [{ text: msg.content }]
-      }));
-
-      // Add the context + new message as the latest user turn
-      contents.push({
-        role: 'user',
-        parts: [{ text: contextMessage }]
-      });
-
-      // Configure thinking only for models that support it (Gemini 2.5/3 series)
-      // For simplicity in this demo, we apply it to all as we allow 3/2.5 selection.
-      // We adjust budget based on model "class" if needed, but 1024 is safe.
-      const response = await this.ai.models.generateContent({
-        model: model,
-        contents: contents,
-        config: {
-          systemInstruction: SYSTEM_INSTRUCTION,
-          thinkingConfig: { thinkingBudget: 1024 },
-        }
-      });
-
-      return response.text || "No response generated.";
-    } catch (error) {
-      console.error("Gemini API Error:", error);
-      return `Error: ${error instanceof Error ? error.message : "Unknown error occurred"}`;
+  private getModelConfig(mode: AgentMode) {
+    switch (mode) {
+      case 'architect':
+        return {
+          model: 'gemini-3-pro-preview',
+          systemInstruction: INSTRUCTION_ARCHITECT,
+          thinkingBudget: 2048
+        };
+      case 'fixer':
+        return {
+          model: 'gemini-3-flash-preview',
+          systemInstruction: INSTRUCTION_FIXER,
+          thinkingBudget: 0
+        };
+      case 'engineer':
+      default:
+        return {
+          model: 'gemini-3-pro-preview',
+          systemInstruction: INSTRUCTION_ENGINEER,
+          thinkingBudget: 1024
+        };
     }
+  }
+
+  async *runAgentLoop(
+    history: Message[], 
+    userRequest: string, 
+    initialFiles: FileSystem, 
+    mode: AgentMode
+  ): AsyncGenerator<AgentEvent> {
+    
+    let currentFiles = { ...initialFiles };
+    const config = this.getModelConfig(mode);
+    
+    // Construct session history
+    const contents: any[] = history.map(msg => ({
+      role: msg.role,
+      parts: [{ text: msg.content }]
+    }));
+
+    contents.push({
+      role: 'user',
+      parts: [{ text: userRequest }]
+    });
+
+    let turns = 0;
+    const MAX_TURNS = mode === 'fixer' ? 8 : 12;
+    let keepGoing = true;
+
+    yield { type: 'terminal', entry: { id: Date.now().toString(), type: 'info', content: `[ADK] Initializing ${mode.toUpperCase()} Runtime...`, timestamp: Date.now() } };
+
+    while (keepGoing && turns < MAX_TURNS) {
+      turns++;
+      
+      try {
+        const result = await this.ai.models.generateContent({
+          model: config.model,
+          contents: contents,
+          config: {
+            systemInstruction: config.systemInstruction,
+            tools: toolsDef,
+            thinkingConfig: { thinkingBudget: config.thinkingBudget },
+          }
+        });
+
+        const response = result.candidates?.[0]?.content;
+        if (!response) throw new Error("No response from AI");
+
+        contents.push(response);
+
+        const parts = response.parts || [];
+        let hasToolCall = false;
+
+        for (const part of parts) {
+          if (part.text) {
+             // The model's "Plan" phase often happens here in text or thinking tokens
+          }
+
+          if (part.functionCall) {
+            hasToolCall = true;
+            const call = part.functionCall;
+            const functionName = call.name;
+            const args = call.args as any;
+            const callId = Date.now().toString();
+
+            yield { type: 'terminal', entry: { id: callId, type: 'command', content: `> ${functionName}(${args.path || args.query || ''})`, timestamp: Date.now() } };
+
+            let toolResult = "";
+
+            // --- EXECUTE TOOL ---
+            if (functionName === 'list_files') {
+              toolResult = tool_repo_map(currentFiles);
+            } else if (functionName === 'read_file') {
+              toolResult = tool_read(currentFiles, args.path);
+            } else if (functionName === 'search_files') {
+              toolResult = tool_search(currentFiles, args.query);
+            } else if (functionName === 'write_file') {
+              // 1. Apply Patch
+              currentFiles = {
+                ...currentFiles,
+                [args.path]: {
+                  path: args.path,
+                  name: args.path.split('/').pop() || 'file',
+                  language: args.path.endsWith('css') ? 'css' : 'typescript',
+                  content: args.content
+                }
+              };
+              yield { type: 'files', files: currentFiles };
+              const writeMsg = `Written ${args.content.length} bytes to ${args.path}.`;
+              
+              // 2. ADK Auto-Verify (Step 1E + Step 2)
+              yield { type: 'terminal', entry: { id: Date.now().toString(), type: 'info', content: `[ADK] Auto-Verifying change...`, timestamp: Date.now() } };
+              const checkResult = tool_run_checks(currentFiles);
+              
+              if (checkResult.includes('FAILED')) {
+                // Verification Failed
+                yield { type: 'terminal', entry: { id: Date.now().toString(), type: 'error', content: checkResult, timestamp: Date.now() } };
+                toolResult = `${writeMsg}\n\n[ADK VERIFICATION FAILED]\n${checkResult}\n\nACTION REQUIRED: Fix the errors in the next step.`;
+              } else {
+                // Verification Passed
+                yield { type: 'terminal', entry: { id: Date.now().toString(), type: 'output', content: "✅ Verification Passed", timestamp: Date.now() } };
+                toolResult = `${writeMsg}\n\n[ADK VERIFICATION PASSED]`;
+              }
+
+            } else if (functionName === 'run_checks') {
+              toolResult = tool_run_checks(currentFiles);
+            } else {
+              toolResult = "Error: Unknown tool";
+            }
+
+            if (functionName !== 'write_file' && functionName !== 'run_checks') {
+                 yield { type: 'terminal', entry: { id: Date.now().toString(), type: 'output', content: toolResult.substring(0, 200) + (toolResult.length > 200 ? '...' : ''), timestamp: Date.now() } };
+            }
+
+            // Send Tool Response back to Model
+            contents.push({
+              role: 'user',
+              parts: [{
+                functionResponse: {
+                  name: functionName,
+                  response: { result: toolResult }
+                }
+              }]
+            });
+          }
+        }
+
+        if (!hasToolCall) {
+          const finalResponseText = parts.find(p => p.text)?.text || "";
+          yield { type: 'message', message: { id: Date.now().toString(), role: 'model', content: finalResponseText, timestamp: Date.now() } };
+          keepGoing = false;
+        }
+
+      } catch (e) {
+        console.error(e);
+        yield { type: 'terminal', entry: { id: Date.now().toString(), type: 'error', content: `ADK Runtime Error: ${e instanceof Error ? e.message : 'Unknown'}`, timestamp: Date.now() } };
+        keepGoing = false;
+      }
+    }
+    
+    yield { type: 'done' };
   }
 }
 
-export const geminiService = new GeminiService();
+export const geminiService = new AdkService();

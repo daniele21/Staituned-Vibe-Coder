@@ -4,36 +4,9 @@ import { Sidebar } from './components/Sidebar';
 import { CodeEditor } from './components/CodeEditor';
 import { ChatPanel } from './components/ChatPanel';
 import { Preview } from './components/Preview';
+import { TerminalPanel } from './components/TerminalPanel';
 import { geminiService } from './services/gemini';
-import { FileSystem, Message } from './types';
-
-// Helper to parse XML file tags from AI response
-const parseFilesFromResponse = (response: string): { files: FileSystem, cleanResponse: string } => {
-  const fileRegex = /<FILE path="([^"]+)">([\s\S]*?)<\/FILE>/g;
-  const newFiles: FileSystem = {};
-  let cleanResponse = response;
-  let match;
-
-  while ((match = fileRegex.exec(response)) !== null) {
-    const path = match[1];
-    const content = match[2].trim(); 
-    const name = path.split('/').pop() || path;
-    const extension = name.split('.').pop() || 'txt';
-    
-    newFiles[path] = {
-      path,
-      name,
-      content,
-      language: extension === 'tsx' || extension === 'ts' ? 'typescript' : 
-                extension === 'css' ? 'css' : 
-                extension === 'html' ? 'html' : 'javascript'
-    };
-  }
-
-  cleanResponse = response.replace(fileRegex, '`[File generated: $1]`');
-
-  return { files: newFiles, cleanResponse };
-};
+import { FileSystem, Message, TerminalEntry, AgentMode } from './types';
 
 const INITIAL_FILES: FileSystem = {
   'src/App.tsx': {
@@ -92,8 +65,10 @@ const App: React.FC = () => {
   const [files, setFiles] = useState<FileSystem>(INITIAL_FILES);
   const [selectedPath, setSelectedPath] = useState<string | null>('src/App.tsx');
   const [messages, setMessages] = useState<Message[]>([]);
+  const [terminalEntries, setTerminalEntries] = useState<TerminalEntry[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [model, setModel] = useState<string>('gemini-3-pro-preview');
+  const [mode, setMode] = useState<AgentMode>('engineer'); // Default to Engineer (Step 4)
+  const [isTerminalOpen, setIsTerminalOpen] = useState(true);
   
   // Mobile UI States
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
@@ -122,37 +97,33 @@ const App: React.FC = () => {
     
     setMessages(prev => [...prev, userMsg]);
     setIsLoading(true);
+    setIsTerminalOpen(true);
 
     try {
-      const rawResponse = await geminiService.sendMessage(messages, text, files, model);
-      const { files: newFiles, cleanResponse } = parseFilesFromResponse(rawResponse);
+      // Step 2 & 3: Run the Agent Loop with the selected Mode
+      const generator = geminiService.runAgentLoop(messages, text, files, mode);
 
-      if (Object.keys(newFiles).length > 0) {
-        setFiles(prev => ({ ...prev, ...newFiles }));
-        if (!selectedPath) {
-          setSelectedPath(Object.keys(newFiles)[0]);
-        }
-        // Auto-switch to preview on mobile when new files are generated
-        if (window.innerWidth < 768) {
-          setMobileTab('preview');
+      for await (const event of generator) {
+        if (event.type === 'message') {
+          setMessages(prev => [...prev, event.message]);
+        } else if (event.type === 'files') {
+          setFiles(event.files);
+          if (!selectedPath) {
+             const newFileKeys = Object.keys(event.files);
+             if (newFileKeys.length > 0) setSelectedPath(newFileKeys[0]);
+          }
+          if (window.innerWidth < 768) setMobileTab('preview');
+        } else if (event.type === 'terminal') {
+          setTerminalEntries(prev => [...prev, event.entry]);
         }
       }
 
-      const aiMsg: Message = {
-        id: (Date.now() + 1).toString(),
-        role: 'model',
-        content: cleanResponse,
-        timestamp: Date.now(),
-      };
-      
-      setMessages(prev => [...prev, aiMsg]);
-
     } catch (error) {
-      console.error("Failed to generate response", error);
+      console.error("Agent Loop Error", error);
       const errorMsg: Message = {
         id: (Date.now() + 1).toString(),
         role: 'model',
-        content: "Sorry, I encountered an error. Please try again.",
+        content: "Sorry, I encountered an error. Check the console logs.",
         timestamp: Date.now(),
       };
       setMessages(prev => [...prev, errorMsg]);
@@ -171,8 +142,8 @@ const App: React.FC = () => {
         files={files} 
         selectedPath={selectedPath} 
         onSelectFile={setSelectedPath}
-        selectedModel={model}
-        onSelectModel={setModel}
+        selectedMode={mode}
+        onSelectMode={setMode}
         isOpen={isSidebarOpen}
         onClose={() => setIsSidebarOpen(false)}
       />
@@ -239,6 +210,12 @@ const App: React.FC = () => {
             ${mobileTab === 'code' ? 'flex' : 'hidden md:flex'}
           `}>
              <CodeEditor file={selectedFile} onUpdateFile={handleUpdateFile} />
+             {/* Terminal Panel inside Editor column for Desktop, or shared for mobile */}
+             <TerminalPanel 
+               entries={terminalEntries} 
+               isOpen={isTerminalOpen} 
+               onToggle={() => setIsTerminalOpen(!isTerminalOpen)} 
+             />
           </div>
 
           {/* Preview Area */}
