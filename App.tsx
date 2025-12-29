@@ -1,12 +1,15 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Menu, MessageSquare, Terminal, Play, Code as CodeIcon } from 'lucide-react';
 import { Sidebar } from './components/Sidebar';
 import { CodeEditor } from './components/CodeEditor';
 import { ChatPanel } from './components/ChatPanel';
 import { Preview } from './components/Preview';
 import { TerminalPanel } from './components/TerminalPanel';
+import { AdminModal } from './components/AdminModal';
+import { AuthModal } from './components/AuthModal';
 import { geminiService } from './services/gemini';
-import { FileSystem, Message, TerminalEntry, AgentMode } from './types';
+import { storageService } from './services/storage';
+import { FileSystem, Message, TerminalEntry, AgentMode, ModelId, Quota, UsageMetadata, User } from './types';
 
 const INITIAL_FILES: FileSystem = {
   'src/App.tsx': {
@@ -61,19 +64,82 @@ export default function App() {
   }
 };
 
+// Estimated Pricing (Per 1 Million Tokens)
+const PRICING = {
+  'gemini-3-pro-preview': { input: 3.50, output: 10.50 },
+  'gemini-3-flash-preview': { input: 0.075, output: 0.30 },
+  'gemini-2.5-flash-latest': { input: 0.075, output: 0.30 },
+};
+
+const calculateCost = (model: ModelId, usage: UsageMetadata): number => {
+  const rates = PRICING[model];
+  const inputCost = (usage.promptTokenCount / 1_000_000) * rates.input;
+  const outputCost = (usage.candidatesTokenCount / 1_000_000) * rates.output;
+  return inputCost + outputCost;
+};
+
 const App: React.FC = () => {
   const [files, setFiles] = useState<FileSystem>(INITIAL_FILES);
   const [selectedPath, setSelectedPath] = useState<string | null>('src/App.tsx');
   const [messages, setMessages] = useState<Message[]>([]);
   const [terminalEntries, setTerminalEntries] = useState<TerminalEntry[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [mode, setMode] = useState<AgentMode>('engineer'); // Default to Engineer (Step 4)
+  
+  // Settings State
+  const [mode, setMode] = useState<AgentMode>('engineer');
+  const [model, setModel] = useState<ModelId>('gemini-3-pro-preview');
+  
+  // Auth & Quota State
+  const [user, setUser] = useState<User | null>(null);
+  const [isAuthOpen, setIsAuthOpen] = useState(false);
+  const [isAdminOpen, setIsAdminOpen] = useState(false);
+  const [quota, setQuota] = useState<Quota>({ 
+    maxTokens: 2_000_000, 
+    usedTokens: 0,
+    cost: 0,
+    resetPeriodHours: 24,
+    lastResetTime: Date.now()
+  });
+
   const [isTerminalOpen, setIsTerminalOpen] = useState(true);
   
   // Mobile UI States
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [mobileTab, setMobileTab] = useState<'code' | 'preview'>('code');
+
+  // Initialize Auth
+  useEffect(() => {
+    const storedUser = storageService.getCurrentUser();
+    if (storedUser) {
+      setUser(storedUser);
+      // Load quota for this user
+      setQuota(storageService.getUserQuota(storedUser.email));
+    } else {
+      setIsAuthOpen(true);
+    }
+  }, []);
+
+  const handleLogin = (newUser: User) => {
+    storageService.login(newUser);
+    setUser(newUser);
+    setQuota(storageService.getUserQuota(newUser.email));
+    setIsAuthOpen(false);
+  };
+
+  const handleLogout = () => {
+    storageService.logout();
+    setUser(null);
+    setMessages([]);
+    setIsAuthOpen(true);
+  };
+
+  // Called when Admin updates their OWN quota via modal
+  const handleQuotaRefresh = () => {
+    if (user) {
+      setQuota(storageService.getUserQuota(user.email));
+    }
+  };
 
   const handleUpdateFile = (newContent: string) => {
     if (selectedPath) {
@@ -88,6 +154,28 @@ const App: React.FC = () => {
   };
 
   const handleSendMessage = async (text: string) => {
+    if (!user) {
+      setIsAuthOpen(true);
+      return;
+    }
+
+    // Refresh quota check (handles time-based resets before sending)
+    const currentQuota = storageService.getUserQuota(user.email);
+    setQuota(currentQuota);
+
+    // Check Quota (Hard Stop)
+    if (currentQuota.usedTokens >= currentQuota.maxTokens) {
+      const errorMsg: Message = {
+        id: Date.now().toString(),
+        role: 'model',
+        content: "🚫 **Quota Exceeded**: You have reached your token limit. It will reset automatically based on your cycle, or contact admin.",
+        timestamp: Date.now(),
+      };
+      setMessages(prev => [...prev, { id: Date.now().toString(), role: 'user', content: text, timestamp: Date.now() }, errorMsg]);
+      setIsAdminOpen(true);
+      return;
+    }
+
     const userMsg: Message = {
       id: Date.now().toString(),
       role: 'user',
@@ -100,8 +188,7 @@ const App: React.FC = () => {
     setIsTerminalOpen(true);
 
     try {
-      // Step 2 & 3: Run the Agent Loop with the selected Mode
-      const generator = geminiService.runAgentLoop(messages, text, files, mode);
+      const generator = geminiService.runAgentLoop(messages, text, files, mode, model);
 
       for await (const event of generator) {
         if (event.type === 'message') {
@@ -115,6 +202,20 @@ const App: React.FC = () => {
           if (window.innerWidth < 768) setMobileTab('preview');
         } else if (event.type === 'terminal') {
           setTerminalEntries(prev => [...prev, event.entry]);
+        } else if (event.type === 'usage') {
+          // Accumulate Cost and Usage
+          const costIncrement = calculateCost(model, event.usage);
+          
+          setQuota(prev => {
+            const updated = {
+              ...prev,
+              usedTokens: prev.usedTokens + event.usage.totalTokenCount,
+              cost: prev.cost + costIncrement
+            };
+            // Persist immediately
+            if (user) storageService.saveUserQuota(user.email, updated);
+            return updated;
+          });
         }
       }
 
@@ -144,8 +245,25 @@ const App: React.FC = () => {
         onSelectFile={setSelectedPath}
         selectedMode={mode}
         onSelectMode={setMode}
+        selectedModel={model}
+        onSelectModel={setModel}
         isOpen={isSidebarOpen}
         onClose={() => setIsSidebarOpen(false)}
+        onOpenAdmin={() => setIsAdminOpen(true)}
+      />
+
+      {/* Modals */}
+      <AuthModal 
+        isOpen={isAuthOpen} 
+        onLogin={handleLogin} 
+      />
+      
+      <AdminModal 
+        isOpen={isAdminOpen} 
+        onClose={() => setIsAdminOpen(false)} 
+        currentUser={user}
+        onQuotaRefresh={handleQuotaRefresh}
+        onLogout={handleLogout}
       />
 
       {/* Main Content Area */}

@@ -32,7 +32,37 @@ export type ToolName = 'list_files' | 'read_file' | 'write_file' | 'run_checks' 
 
 export type AgentMode = 'architect' | 'engineer' | 'fixer';
 
+export type ModelId = 'gemini-3-pro-preview' | 'gemini-3-flash-preview' | 'gemini-2.5-flash-latest';
+
+export interface User {
+  id: string;
+  email: string;
+  name: string;
+  avatar: string;
+}
+
+export interface Quota {
+  maxTokens: number;
+  usedTokens: number;
+  cost: number; // Estimated cost in USD (cumulative lifetime)
+  resetPeriodHours: number; // How many hours until usage resets
+  lastResetTime: number; // Timestamp of last reset
+}
+
+export interface UsageMetadata {
+  promptTokenCount: number;
+  candidatesTokenCount: number;
+  totalTokenCount: number;
+}
+
 export interface AgentStep {
   type: 'thought' | 'call' | 'result';
   content: string;
 }
+
+export type AgentEvent = 
+  | { type: 'message', message: Message }
+  | { type: 'files', files: FileSystem }
+  | { type: 'terminal', entry: TerminalEntry }
+  | { type: 'usage', usage: UsageMetadata }
+  | { type: 'done' };

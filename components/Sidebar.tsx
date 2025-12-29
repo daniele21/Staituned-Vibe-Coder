@@ -1,6 +1,6 @@
 import React from 'react';
-import { File, Code, Terminal, ChevronDown, X, Box, BrainCircuit, Hammer, Wrench } from 'lucide-react';
-import { FileNode, FileSystem, AgentMode } from '../types';
+import { File, Code, Terminal, ChevronDown, X, Box, BrainCircuit, Hammer, Wrench, Cpu, Settings } from 'lucide-react';
+import { FileNode, FileSystem, AgentMode, ModelId } from '../types';
 
 interface SidebarProps {
   files: FileSystem;
@@ -8,8 +8,11 @@ interface SidebarProps {
   onSelectFile: (path: string) => void;
   selectedMode: AgentMode;
   onSelectMode: (mode: AgentMode) => void;
+  selectedModel: ModelId;
+  onSelectModel: (model: ModelId) => void;
   isOpen: boolean;
   onClose: () => void;
+  onOpenAdmin: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({ 
@@ -18,8 +21,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
   onSelectFile, 
   selectedMode, 
   onSelectMode,
+  selectedModel,
+  onSelectModel,
   isOpen,
-  onClose
+  onClose,
+  onOpenAdmin
 }) => {
   const fileList = (Object.values(files) as FileNode[]).sort((a, b) => a.path.localeCompare(b.path));
 
@@ -27,6 +33,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
     { id: 'architect', name: 'Architect', icon: BrainCircuit, desc: 'Plans structure & strategy' },
     { id: 'engineer', name: 'Engineer', icon: Hammer, desc: 'Builds & verifies code' },
     { id: 'fixer', name: 'Fixer', icon: Wrench, desc: 'Debugs & fixes errors' },
+  ];
+
+  const MODELS: { id: ModelId; name: string }[] = [
+    { id: 'gemini-3-pro-preview', name: 'Gemini 3 Pro (Preview)' },
+    { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash (Preview)' },
+    { id: 'gemini-2.5-flash-latest', name: 'Gemini 2.5 Flash' },
   ];
 
   return (
@@ -41,104 +53,103 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
       {/* Sidebar Container */}
       <div className={`
-        fixed inset-y-0 left-0 z-50 w-72 bg-slate-900 border-r border-slate-800 transform transition-transform duration-300 ease-in-out
-        md:relative md:translate-x-0 md:w-64 md:z-0
+        fixed inset-y-0 left-0 z-50 w-72 bg-slate-900 border-r border-slate-800 transform transition-transform duration-300 ease-in-out flex flex-col
+        md:relative md:translate-x-0 md:z-0
         ${isOpen ? 'translate-x-0' : '-translate-x-full'}
       `}>
-        <div className="flex flex-col h-full">
-          {/* Header */}
-          <div className="h-14 px-4 border-b border-slate-800 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <div className="w-8 h-8 bg-indigo-500/10 rounded-lg flex items-center justify-center border border-indigo-500/20">
-                <Terminal className="w-4 h-4 text-indigo-500" />
-              </div>
-              <h2 className="font-bold text-slate-100 tracking-wide">VibeCoder</h2>
-            </div>
-            <button 
-              onClick={onClose}
-              className="md:hidden p-1 text-slate-400 hover:text-slate-200"
-            >
-              <X className="w-5 h-5" />
-            </button>
+        {/* Header */}
+        <div className="h-14 px-4 border-b border-slate-800 flex items-center justify-between shrink-0">
+          <div className="flex items-center gap-2 font-bold text-slate-100">
+            <Terminal className="w-5 h-5 text-indigo-500" />
+            <span className="tracking-tight">VibeCoder Studio</span>
           </div>
+          <button onClick={onClose} className="md:hidden text-slate-400 hover:text-white">
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        {/* Scrollable Content */}
+        <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-6">
           
-          {/* File Explorer */}
-          <div className="flex-1 overflow-y-auto p-3">
-            <div className="mb-3 px-2 text-xs font-bold text-slate-500 uppercase tracking-wider flex items-center gap-2">
-              <Box className="w-3 h-3" />
-              Project Files
+          {/* Mode Selection */}
+          <div className="space-y-2">
+            <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2 flex items-center gap-1">
+              <Box className="w-3 h-3" /> Agent Mode
+            </h3>
+            <div className="grid gap-2">
+              {MODES.map((mode) => (
+                <button
+                  key={mode.id}
+                  onClick={() => onSelectMode(mode.id)}
+                  className={`w-full flex items-center gap-3 p-2.5 rounded-lg border transition-all text-left ${
+                    selectedMode === mode.id
+                      ? 'bg-indigo-600/10 border-indigo-500/50 text-indigo-200'
+                      : 'bg-slate-800/50 border-transparent text-slate-400 hover:bg-slate-800 hover:text-slate-200'
+                  }`}
+                >
+                  <mode.icon className={`w-4 h-4 ${selectedMode === mode.id ? 'text-indigo-400' : 'text-slate-500'}`} />
+                  <div>
+                    <div className="text-sm font-medium">{mode.name}</div>
+                    <div className="text-[10px] opacity-70 leading-tight">{mode.desc}</div>
+                  </div>
+                </button>
+              ))}
             </div>
-            
-            {fileList.length === 0 ? (
-              <div className="text-slate-500 text-sm italic px-4 py-2 text-center">
-                No files yet. <br/> Ask AI to start!
-              </div>
-            ) : (
-              <div className="space-y-1">
-                {fileList.map((file) => (
-                  <button
-                    key={file.path}
-                    onClick={() => {
-                      onSelectFile(file.path);
-                      if (window.innerWidth < 768) onClose();
-                    }}
-                    className={`w-full flex items-center gap-2.5 px-3 py-2 text-sm rounded-lg transition-all ${
-                      selectedPath === file.path
-                        ? 'bg-indigo-600/10 text-indigo-300 border border-indigo-600/20 shadow-sm'
-                        : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200 border border-transparent'
-                    }`}
-                  >
-                    {file.path.endsWith('.tsx') || file.path.endsWith('.ts') ? (
-                      <Code className="w-4 h-4 shrink-0 text-blue-400" />
-                    ) : (
-                      <File className="w-4 h-4 shrink-0 text-slate-500" />
-                    )}
-                    <span className="truncate font-medium">{file.name}</span>
-                  </button>
+          </div>
+
+          {/* Model Selection */}
+          <div className="space-y-2">
+            <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2 flex items-center gap-1">
+              <Cpu className="w-3 h-3" /> Model
+            </h3>
+            <div className="relative">
+              <select
+                value={selectedModel}
+                onChange={(e) => onSelectModel(e.target.value as ModelId)}
+                className="w-full appearance-none bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-300 focus:outline-none focus:border-indigo-500 transition-colors"
+              >
+                {MODELS.map(m => (
+                  <option key={m.id} value={m.id}>{m.name}</option>
                 ))}
-              </div>
-            )}
-          </div>
-
-          {/* Footer / Agent Mode Selector */}
-          <div className="p-4 border-t border-slate-800 bg-slate-900/50">
-            <label className="block text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">
-              Agent Mode
-            </label>
-            <div className="space-y-1">
-              {MODES.map((mode) => {
-                const Icon = mode.icon;
-                const isSelected = selectedMode === mode.id;
-                return (
-                  <button
-                    key={mode.id}
-                    onClick={() => onSelectMode(mode.id)}
-                    className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-left transition-all ${
-                      isSelected 
-                        ? 'bg-indigo-600/20 text-indigo-300 border border-indigo-500/30' 
-                        : 'text-slate-400 hover:bg-slate-800 hover:text-slate-200 border border-transparent'
-                    }`}
-                  >
-                    <Icon className={`w-4 h-4 ${isSelected ? 'text-indigo-400' : 'text-slate-500'}`} />
-                    <div>
-                      <div className="text-xs font-bold">{mode.name}</div>
-                      <div className="text-[10px] opacity-70 leading-none mt-0.5">{mode.desc}</div>
-                    </div>
-                  </button>
-                );
-              })}
-            </div>
-
-            <div className="flex items-center gap-2 mt-4 pt-4 border-t border-slate-800/50">
-              <div className="relative flex items-center justify-center w-2 h-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
-              </div>
-              <span className="text-[10px] font-medium text-emerald-500 uppercase tracking-wider">
-                {selectedMode === 'architect' ? 'Gemini 3 Pro (Thinking)' : selectedMode === 'engineer' ? 'Gemini 3 Pro' : 'Gemini 3 Flash'}
-              </span>
+              </select>
+              <ChevronDown className="absolute right-3 top-2.5 w-4 h-4 text-slate-500 pointer-events-none" />
             </div>
           </div>
+
+          {/* File Explorer */}
+          <div className="space-y-1">
+            <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-2 flex items-center gap-1">
+              <File className="w-3 h-3" /> Workspace
+            </h3>
+            <div className="space-y-0.5">
+              {fileList.map((file) => (
+                <button
+                  key={file.path}
+                  onClick={() => onSelectFile(file.path)}
+                  className={`w-full flex items-center gap-2 px-3 py-2 text-sm rounded-md transition-colors ${
+                    selectedPath === file.path
+                      ? 'bg-indigo-500/10 text-indigo-300 font-medium'
+                      : 'text-slate-400 hover:text-slate-200 hover:bg-slate-800/50'
+                  }`}
+                >
+                  <Code className="w-3.5 h-3.5 opacity-70" />
+                  <span className="truncate">{file.name}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+        </div>
+
+        {/* Footer */}
+        <div className="p-4 border-t border-slate-800 shrink-0">
+          <button
+            onClick={onOpenAdmin}
+            className="w-full flex items-center gap-2 px-3 py-2 text-sm text-slate-400 hover:text-slate-200 hover:bg-slate-800 rounded-lg transition-colors"
+          >
+            <Settings className="w-4 h-4" />
+            <span>Profile & Settings</span>
+          </button>
         </div>
       </div>
     </>

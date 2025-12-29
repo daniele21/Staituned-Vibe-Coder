@@ -1,5 +1,5 @@
 import { GoogleGenAI, Tool, FunctionDeclaration, Type } from "@google/genai";
-import { Message, FileSystem, TerminalEntry, AgentMode } from "../types";
+import { Message, FileSystem, TerminalEntry, AgentMode, ModelId, AgentEvent } from "../types";
 import { tool_repo_map, tool_read, tool_search, tool_run_checks } from "./tools";
 
 /**
@@ -93,12 +93,6 @@ const toolsDef = [
   }
 ];
 
-export type AgentEvent = 
-  | { type: 'message', message: Message }
-  | { type: 'files', files: FileSystem }
-  | { type: 'terminal', entry: TerminalEntry }
-  | { type: 'done' };
-
 export class AdkService {
   private ai: GoogleGenAI;
 
@@ -106,26 +100,23 @@ export class AdkService {
     this.ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   }
 
-  private getModelConfig(mode: AgentMode) {
+  private getRoleConfig(mode: AgentMode) {
     switch (mode) {
       case 'architect':
         return {
-          model: 'gemini-3-pro-preview',
           systemInstruction: INSTRUCTION_ARCHITECT,
-          thinkingBudget: 2048
+          defaultThinkingBudget: 2048
         };
       case 'fixer':
         return {
-          model: 'gemini-3-flash-preview',
           systemInstruction: INSTRUCTION_FIXER,
-          thinkingBudget: 0
+          defaultThinkingBudget: 0
         };
       case 'engineer':
       default:
         return {
-          model: 'gemini-3-pro-preview',
           systemInstruction: INSTRUCTION_ENGINEER,
-          thinkingBudget: 1024
+          defaultThinkingBudget: 1024
         };
     }
   }
@@ -134,11 +125,12 @@ export class AdkService {
     history: Message[], 
     userRequest: string, 
     initialFiles: FileSystem, 
-    mode: AgentMode
+    mode: AgentMode,
+    modelId: ModelId
   ): AsyncGenerator<AgentEvent> {
     
     let currentFiles = { ...initialFiles };
-    const config = this.getModelConfig(mode);
+    const roleConfig = this.getRoleConfig(mode);
     
     // Construct session history
     const contents: any[] = history.map(msg => ({
@@ -155,23 +147,37 @@ export class AdkService {
     const MAX_TURNS = mode === 'fixer' ? 8 : 12;
     let keepGoing = true;
 
-    yield { type: 'terminal', entry: { id: Date.now().toString(), type: 'info', content: `[ADK] Initializing ${mode.toUpperCase()} Runtime...`, timestamp: Date.now() } };
+    yield { type: 'terminal', entry: { id: Date.now().toString(), type: 'info', content: `[ADK] Initializing ${mode.toUpperCase()} Runtime on ${modelId}...`, timestamp: Date.now() } };
 
     while (keepGoing && turns < MAX_TURNS) {
       turns++;
       
       try {
         const result = await this.ai.models.generateContent({
-          model: config.model,
+          model: modelId,
           contents: contents,
           config: {
-            systemInstruction: config.systemInstruction,
+            systemInstruction: roleConfig.systemInstruction,
             tools: toolsDef,
-            thinkingConfig: { thinkingBudget: config.thinkingBudget },
+            // Only use thinking budget if model is compatible and mode suggests it
+            thinkingConfig: modelId.includes('gemini-3') ? { thinkingBudget: roleConfig.defaultThinkingBudget } : undefined,
           }
         });
 
         const response = result.candidates?.[0]?.content;
+        
+        // Report Usage
+        if (result.usageMetadata) {
+          yield { 
+            type: 'usage', 
+            usage: {
+              promptTokenCount: result.usageMetadata.promptTokenCount || 0,
+              candidatesTokenCount: result.usageMetadata.candidatesTokenCount || 0,
+              totalTokenCount: result.usageMetadata.totalTokenCount || 0
+            } 
+          };
+        }
+
         if (!response) throw new Error("No response from AI");
 
         contents.push(response);
@@ -181,7 +187,7 @@ export class AdkService {
 
         for (const part of parts) {
           if (part.text) {
-             // The model's "Plan" phase often happens here in text or thinking tokens
+             // The model's "Plan" phase often happens here
           }
 
           if (part.functionCall) {
